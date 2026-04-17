@@ -4,7 +4,9 @@ version = "0.0.1"
 description = ""
 readme = "README.md"
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "aiofiles>=25.1.0",
+]
 
 
 
@@ -14,6 +16,7 @@ dev = [
     "pytest>=8.4.2",
     "pytest-cov>=7.0.0",
     "ruff>=0.13.1",
+    "types-aiofiles>=25.1.0.20260409",
 ]
 
 [tool.mypy]

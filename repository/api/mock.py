@@ -1,12 +1,15 @@
-from time import sleep
+import asyncio
+from collections.abc import AsyncIterator
 from uuid import uuid4
 
 from domain.task import Task
-from domain.task_queue import TaskQueue
 from domain.task_status import TaskStatus
 
 
 class MockExternalSource:
+    def __init__(self) -> None:
+        self._payload: list[object] | None = None
+
     def _task_from_raw(self, item: object) -> Task:
         if not isinstance(item, dict):
             raise TypeError('Каждая запись задачи должна быть словарём')
@@ -30,16 +33,13 @@ class MockExternalSource:
             status,
         )
 
-    def get_tasks(self) -> TaskQueue:
-        payload: list[object] | None = None
-
-        # Кэшируем ответ после первой загрузки, чтобы сохранить повторяемую итерацию одной и той же очереди без повторной задержки
-        def load_payload() -> list[object]:
-            nonlocal payload
-
-            if payload is None:
-                sleep(1)
-                payload = [
+    def get_tasks(self) -> AsyncIterator[Task]:
+        async def load_payload() -> list[object]:
+            if self._payload is None:
+                # Кэшируем ответ после первой загрузки, чтобы при повторном вызове
+                # не имитировать задержку внешнего источника ещё раз
+                await asyncio.sleep(1)
+                self._payload = [
                     {
                         'description': 'Check external queue',
                         'priority': 1,
@@ -52,10 +52,10 @@ class MockExternalSource:
                     },
                 ]
 
-            return payload
+            return self._payload
 
-        def iter_tasks():
-            for item in load_payload():
+        async def iter_tasks() -> AsyncIterator[Task]:
+            for item in await load_payload():
                 yield self._task_from_raw(item)
 
-        return TaskQueue(iter_tasks)
+        return iter_tasks()

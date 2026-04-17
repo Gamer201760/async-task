@@ -1,9 +1,12 @@
+import asyncio
 import json
+from collections.abc import AsyncIterator
 from pathlib import Path
 from uuid import uuid4
 
+import aiofiles
+
 from domain.task import Task
-from domain.task_queue import TaskQueue
 from domain.task_status import TaskStatus
 
 
@@ -34,17 +37,19 @@ class TaskJsonSource:
             status,
         )
 
-    def get_tasks(self) -> TaskQueue:
-        def iter_raw_tasks():
-            if not self._path.exists():
+    def get_tasks(self) -> AsyncIterator[Task]:
+        async def iter_raw_tasks() -> AsyncIterator[object]:
+            if not await asyncio.to_thread(self._path.exists):
                 raise FileNotFoundError(f'Файл с задачами не найден: {self._path}')
-            if not self._path.is_file():
+            if not await asyncio.to_thread(self._path.is_file):
                 raise IsADirectoryError(
                     f'Ожидался файл, но получен каталог: {self._path}'
                 )
 
-            with self._path.open(encoding='utf-8') as file:
-                for line_number, line in enumerate(file, start=1):
+            async with aiofiles.open(self._path, encoding='utf-8') as file:
+                line_number = 0
+                async for line in file:
+                    line_number += 1
                     raw_line = line.strip()
                     if not raw_line:
                         continue
@@ -56,8 +61,8 @@ class TaskJsonSource:
                             f'Некорректный JSONL в файле с задачами: {self._path}, строка {line_number}'
                         ) from err
 
-        def iter_tasks():
-            for item in iter_raw_tasks():
+        async def iter_tasks() -> AsyncIterator[Task]:
+            async for item in iter_raw_tasks():
                 yield self._task_from_raw(item)
 
-        return TaskQueue(iter_tasks)
+        return iter_tasks()

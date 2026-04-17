@@ -1,14 +1,15 @@
+from collections.abc import AsyncIterator
 from random import Random
 from uuid import UUID
 
 from domain.task import Task
-from domain.task_queue import TaskQueue
 from domain.task_status import TaskStatus
 
 
 class RandomJobsSource:
     def __init__(self, rnd: Random) -> None:
         self._rnd = rnd
+        self._payload: list[object] | None = None
 
     def _generate_raw_tasks(self) -> list[dict[str, object]]:
         actions = ('Review', 'Update', 'Prepare', 'Check', 'Close')
@@ -64,19 +65,15 @@ class RandomJobsSource:
             status,
         )
 
-    def get_tasks(self) -> TaskQueue:
-        payload: list[object] | None = None
-
+    def get_tasks(self) -> AsyncIterator[Task]:
         def load_raw_tasks() -> list[object]:
-            nonlocal payload
+            if self._payload is None:
+                self._payload = list(self._generate_raw_tasks())
 
-            if payload is None:
-                payload = list(self._generate_raw_tasks())
+            return self._payload
 
-            return payload
-
-        def iter_tasks():
+        async def iter_tasks() -> AsyncIterator[Task]:
             for raw_task in load_raw_tasks():
                 yield self._task_from_raw(raw_task)
 
-        return TaskQueue(iter_tasks)
+        return iter_tasks()
