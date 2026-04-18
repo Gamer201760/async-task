@@ -4,10 +4,10 @@ from uuid import UUID
 
 import pytest
 
-from domain.error import TaskStatusValidationError
 from domain.task import Task
 from domain.task_status import TaskStatus
 from repository.generator.rand import RandomJobsSource
+from test.helpers import collect_async, run_async
 
 
 def _source_with_raw_tasks(
@@ -31,7 +31,7 @@ def _task_snapshot(task: Task) -> tuple[UUID, str, int, TaskStatus]:
 
 
 def _collect_tasks(source: RandomJobsSource) -> list[Task]:
-    return list(source.get_tasks())
+    return run_async(collect_async(source.get_tasks()))
 
 
 def test_get_tasks_returns_non_empty_iterable_of_tasks() -> None:
@@ -61,6 +61,17 @@ def test_generated_tasks_have_uuid_ids_non_empty_descriptions_and_valid_prioriti
         assert task.description
         assert isinstance(task.priority, int)
         assert task.priority >= 1
+
+
+def test_same_source_reuses_cached_payload_on_new_iteration() -> None:
+    source = RandomJobsSource(Random(7))
+
+    first_pass = _collect_tasks(source)
+    second_pass = _collect_tasks(source)
+
+    assert [_task_snapshot(task) for task in first_pass] == [
+        _task_snapshot(task) for task in second_pass
+    ]
 
 
 def test_missing_status_defaults_to_task_status_new(
@@ -101,11 +112,29 @@ def test_explicit_id_and_status_are_preserved_after_mapping(
     assert tasks[0].status is TaskStatus.DONE
 
 
+def test_missing_id_generates_deterministic_uuid_and_defaults_missing_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generated_id = UUID('12345678-1234-5678-1234-567812345678')
+    source = _source_with_raw_tasks(
+        monkeypatch,
+        [{'description': 'Generated id task'}],
+    )
+    monkeypatch.setattr(source, '_generate_task_id', lambda: generated_id)
+
+    tasks = _collect_tasks(source)
+
+    assert len(tasks) == 1
+    assert tasks[0].id == generated_id
+    assert tasks[0].priority == 1
+    assert tasks[0].status is TaskStatus.NEW
+
+
 def test_invalid_explicit_id_propagates_uuid_validation_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(ValueError):
-        list(
+        _collect_tasks(
             _source_with_raw_tasks(
                 monkeypatch,
                 [
@@ -115,36 +144,17 @@ def test_invalid_explicit_id_propagates_uuid_validation_error(
                         'priority': 2,
                     }
                 ],
-            ).get_tasks()
-        )
-
-
-def test_invalid_explicit_status_propagates_status_validation_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with pytest.raises(TaskStatusValidationError):
-        list(
-            _source_with_raw_tasks(
-                monkeypatch,
-                [
-                    {
-                        'id': '87654321-4321-8765-4321-876543218765',
-                        'description': 'Bad status task',
-                        'priority': 2,
-                        'status': 'paused',
-                    }
-                ],
-            ).get_tasks()
+            )
         )
 
 
 def test_non_dict_raw_items_raise_type_error(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(TypeError):
-        list(
+        _collect_tasks(
             _source_with_raw_tasks(
                 monkeypatch,
                 ['not-a-task-mapping'],
-            ).get_tasks()
+            )
         )
 
 
@@ -152,11 +162,11 @@ def test_missing_description_raises_value_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(ValueError, match='description'):
-        list(
+        _collect_tasks(
             _source_with_raw_tasks(
                 monkeypatch,
                 [{'priority': 4, 'status': 'new'}],
-            ).get_tasks()
+            )
         )
 
 

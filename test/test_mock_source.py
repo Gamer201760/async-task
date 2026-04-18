@@ -1,4 +1,3 @@
-import time
 from uuid import UUID
 
 import pytest
@@ -6,9 +5,9 @@ import pytest
 import repository.api.mock as mock_module
 from domain.error import TaskStatusValidationError
 from domain.task import Task
-from domain.task_queue import TaskQueue
 from domain.task_status import TaskStatus
 from repository.api.mock import MockExternalSource
+from test.helpers import collect_async, run_async
 
 DEFAULT_RAW_TASKS: list[dict[str, object]] = [
     {
@@ -24,36 +23,11 @@ DEFAULT_RAW_TASKS: list[dict[str, object]] = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def sleep_calls(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    calls: list[float] = []
-
-    def fake_sleep(seconds: float) -> None:
-        calls.append(seconds)
-
-    monkeypatch.setattr(time, 'sleep', fake_sleep)
-    monkeypatch.setattr(mock_module, 'sleep', fake_sleep, raising=False)
-
-    module_time = getattr(mock_module, 'time', None)
-    if module_time is not None:
-        monkeypatch.setattr(module_time, 'sleep', fake_sleep)
-
-    return calls
-
-
 def _source_with_raw_tasks(raw_tasks: list[object]) -> MockExternalSource:
     source = MockExternalSource()
-
-    def get_tasks() -> TaskQueue:
-        stored_raw_tasks = list(raw_tasks)
-
-        def iter_tasks():
-            for item in stored_raw_tasks:
-                yield source._task_from_raw(item)
-
-        return TaskQueue(iter_tasks)
-
-    source.get_tasks = get_tasks  # type: ignore[method-assign]
+    source._payload = [
+        dict(item) if isinstance(item, dict) else item for item in raw_tasks
+    ]
     return source
 
 
@@ -79,7 +53,7 @@ def _assert_task_matches_raw_item(task: Task, raw_item: dict[str, object]) -> No
 
 
 def _collect_tasks(source: MockExternalSource) -> list[Task]:
-    return list(source.get_tasks())
+    return run_async(collect_async(source.get_tasks()))
 
 
 def test_get_tasks_returns_non_empty_iterable_of_tasks() -> None:
@@ -177,7 +151,7 @@ def test_explicit_id_path_does_not_call_uuid_generator(
 
 def test_invalid_explicit_id_propagates_uuid_validation_error() -> None:
     with pytest.raises(ValueError):
-        list(
+        _collect_tasks(
             _source_with_raw_tasks(
                 [
                     {
@@ -186,13 +160,13 @@ def test_invalid_explicit_id_propagates_uuid_validation_error() -> None:
                         'priority': 2,
                     }
                 ],
-            ).get_tasks()
+            )
         )
 
 
 def test_invalid_explicit_status_propagates_status_validation_error() -> None:
     with pytest.raises(TaskStatusValidationError):
-        list(
+        _collect_tasks(
             _source_with_raw_tasks(
                 [
                     {
@@ -202,18 +176,18 @@ def test_invalid_explicit_status_propagates_status_validation_error() -> None:
                         'status': 'paused',
                     }
                 ],
-            ).get_tasks()
+            )
         )
 
 
 def test_non_dict_raw_items_raise_type_error() -> None:
     with pytest.raises(TypeError):
-        list(_source_with_raw_tasks(['not-a-task-mapping']).get_tasks())
+        _collect_tasks(_source_with_raw_tasks(['not-a-task-mapping']))
 
 
 def test_missing_description_raises_value_error() -> None:
     with pytest.raises(ValueError, match='description'):
-        list(_source_with_raw_tasks([{'priority': 4, 'status': 'new'}]).get_tasks())
+        _collect_tasks(_source_with_raw_tasks([{'priority': 4, 'status': 'new'}]))
 
 
 def test_missing_priority_defaults_to_one() -> None:
@@ -227,8 +201,20 @@ def test_missing_priority_defaults_to_one() -> None:
     assert tasks[0].status is TaskStatus.NEW
 
 
-def test_latency_uses_sleep_without_slowing_down_test(sleep_calls: list[float]) -> None:
-    tasks = _collect_tasks(MockExternalSource())
+def test_latency_uses_async_sleep_once_and_caches_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleep_calls: list[float] = []
 
-    assert tasks
+    async def fake_sleep(seconds: float) -> None:
+        sleep_calls.append(seconds)
+
+    monkeypatch.setattr(mock_module.asyncio, 'sleep', fake_sleep)
+    source = MockExternalSource()
+
+    first_pass = _collect_tasks(source)
+    second_pass = _collect_tasks(source)
+
+    assert first_pass
+    assert [task.id for task in first_pass] == [task.id for task in second_pass]
     assert sleep_calls == [1]
