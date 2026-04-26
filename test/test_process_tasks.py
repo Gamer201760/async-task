@@ -5,9 +5,9 @@ from uuid import UUID
 import pytest
 
 from domain.task import Task
+from test.helpers import run_async
 from usecase.interface import DataSource, TaskHandler
 from usecase.process import ProcessTasks
-from test.helpers import run_async
 
 
 def _task(index: int, description: str) -> Task:
