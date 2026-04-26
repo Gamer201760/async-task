@@ -1,46 +1,31 @@
-# Лабораторная работа №3 — Очередь задач (`TaskQueue`)
+# Лабораторная работа №4 — Асинхронный исполнитель задач
 
 ## Цель
-Научиться строить ленивые коллекции задач, совместимые со стандартными конструкциями Python, и обеспечивать повторяемую итерацию без преждевременного накопления данных
+Реализовать асинхронную систему обработки задач с расширяемыми источниками и обработчиком через `Protocol`
 
-## Модель `Task`
-- основная модель описана в [`domain/task.py`](domain/task.py)
+## Доменная модель
+- основная модель задачи находится в [`domain/task.py`](domain/task.py)
 - статусы перечислены в [`domain/task_status.py`](domain/task_status.py)
-- исключения домена (`TaskStatusValidationError`, `TaskStatusTransitionError`) и дескрипторы находятся в `domain`
-- `Task` принимает `id`, `description`, `priority` и `status`, нормализует строковые статусы и обеспечивает допустимые переходы
+- дескрипторы и доменные ошибки находятся в `domain/`
+- `TaskQueue` из 3 лабы сохранён в проекте как отдельная коллекция, но в сценарии 4 лабы не используется как исполнитель
 
-## Очередь задач `TaskQueue`
-- реализация находится в [`domain/task_queue.py`](domain/task_queue.py)
-- поддерживает повторяемую итерацию через фабрику итераторов или повторно итерируемый источник
-- ленивые фильтры `filter_by_status(...)` и `filter_by_priority(...)` возвращают новый `TaskQueue`, при этом задачи создаются по мере обхода
-- совместима с `for`, `list`, `sum` и любыми другими API, работающими с `Iterable`
-- пример использования:
-
-```python
-from domain.task_queue import TaskQueue
-from domain.task_status import TaskStatus
-
-queue = TaskQueue([...])  # любой повторяемый источник или iterator factory
-
-for task in queue:
-    print(task.description)
-
-tasks = list(queue)
-total_priority = sum(task.priority for task in queue)
-
-filtered = queue.filter_by_status(TaskStatus.IN_PROGRESS).filter_by_priority(min_priority=2)
-```
-
-Фильтрация происходит лениво, новые итерации каждого `TaskQueue` заново создают источник, поэтому `queue` и `filtered` можно обходить многократно
+## Контракты
+- [`usecase/interface.py`](usecase/interface.py)
+- `DataSource` -> `get_tasks() -> AsyncIterator[Task]`
+- `TaskHandler` -> `async handle(task: Task) -> None`
+  - обработчик отвечает за обработку одной задачи и не управляет обходом источников
 
 ## Источники задач
-- контракт источника описан в [`usecase/interface.py`](usecase/interface.py) через `DataSource`
-- обработка коллекции реализована в [`usecase/process.py`](usecase/process.py), `ProcessTasks.build_queue()` объединяет источники с помощью `itertools.chain` и возвращает `TaskQueue`
-- `MockExternalSource` (`repository/api/mock.py`) имитирует внешний API, создаёт `Task` из полученных словарей и добавляет UUID/статус по умолчанию
-- `TaskJsonSource` (`repository/file/json.py`) читает JSONL-файл `tasks.jsonl`, ожидает по одному JSON-объекту задачи на строку, проверяет обязательные поля, поддерживает `id`, `priority`, `status` и создаёт доменные `Task` по мере обхода очереди
-- `RandomJobsSource` (`repository/generator/rand.py`) генерирует повторяемый набор сырого описания задач, преобразует в `Task` и возвращает `TaskQueue`
-
-Все источники возвращают `TaskQueue`, поэтому создание доменных `Task` происходит лениво во время обхода. Для JSONL-источника это означает чтение файла построчно без кэширования всего содержимого: каждый новый обход очереди заново открывает файл и читает его сначала
+- [`repository/file/json.py`](repository/file/json.py)
+  - `TaskJsonSource` читает JSONL асинхронно через `aiofiles`
+  - при каждом новом обходе заново открывает файл
+  - проверяет обязательные поля и создаёт `Task` лениво
+- [`repository/api/mock.py`](repository/api/mock.py)
+  - `MockExternalSource` имитирует внешний источник через `await asyncio.sleep(...)`
+  - кэширует payload после первой загрузки
+- [`repository/generator/rand.py`](repository/generator/rand.py)
+  - `RandomJobsSource` генерирует повторяемый набор задач по `seed`
+  - переиспользует кэш между повторными обходами одного source
 
 Пример `tasks.jsonl`:
 
@@ -50,14 +35,32 @@ filtered = queue.filter_by_status(TaskStatus.IN_PROGRESS).filter_by_priority(min
 {"description":"Сформировать итоговый отчёт"}
 ```
 
-## Use case и CLI
-- `ProcessTasks.execute()` принимает очередь и логирует каждый `Task`, при необходимости строит очередь из добавленных источников
-- `adapter/cli/main.py` собирает `MockExternalSource`, `TaskJsonSource` (по `--file`) и `RandomJobsSource` (по `--seed`), строит комбинированную очередь через `process.build_queue()`, при необходимости лениво применяет `filter_by_status(...)` и `filter_by_priority(...)`, после чего выполняет один потоковый проход по выбранной очереди
-- CLI аргументы: `--file` (по умолчанию `./tasks.jsonl`), `--seed` (по умолчанию `1`), `--status`, `--min-priority`, `--max-priority`
-- пример запуска:
+## Оркестрация обработки
+- [`usecase/process.py`](usecase/process.py)
+  - `ProcessTasks` остаётся оркестратором
+  - последовательно обходит зарегистрированные source через `async for`
+  - централизованно логирует старт, обработку и итоговую сводку
+  - если обработка одной задачи падает, логирует ошибку и продолжает работу с остальными задачами
+
+## Handler
+- [`adapter/cli/handler.py`](adapter/cli/handler.py)
+  - `LoggingTaskHandler` реализует контракт `TaskHandler`
+  - логирует поля обработанной задачи
+
+## CLI
+- [`adapter/cli/main.py`](adapter/cli/main.py)
+  - собирает `MockExternalSource`, `TaskJsonSource` и `RandomJobsSource`
+  - создаёт `ProcessTasks(handler, sources)`
+  - запускает обработку через `asyncio.run(...)`
+
+Аргументы CLI:
+- `--file` путь до JSONL файла с задачами
+- `--seed` seed для генератора случайных задач
+
+Пример запуска:
 
 ```bash
-uv run python -m adapter.cli.main --file ./tasks.jsonl --seed 42 --status in_progress --min-priority 2 --max-priority 4
+uv run python -m adapter.cli.main --file ./tasks.jsonl --seed 42
 ```
 
 ## Запуск и проверки
@@ -65,13 +68,10 @@ uv run python -m adapter.cli.main --file ./tasks.jsonl --seed 42 --status in_pro
 
 ### Через `make`
 
-Аргументы CLI можно передавать через переменную `ARGS`
-
 ```bash
 make install
 make run
-make run ARGS="--status in_progress"
-make run ARGS="--file ./tasks.jsonl --seed 42 --min-priority 2 --max-priority 4"
+make run ARGS="--file ./tasks.jsonl --seed 42"
 make test
 make lint
 make typecheck
@@ -83,7 +83,8 @@ make pre-commit
 ```bash
 uv sync
 uv run python -m adapter.cli.main
-uv run pytest -v
+uv run python -m adapter.cli.main --file ./tasks.jsonl --seed 42
+uv run pytest -q
 uv run ruff check .
 uv run mypy .
 ```

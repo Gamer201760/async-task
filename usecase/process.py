@@ -1,15 +1,31 @@
-from itertools import chain
+from collections.abc import AsyncIterator
+from inspect import iscoroutinefunction
 from logging import getLogger
 
-from domain.task_queue import TaskQueue
-from usecase.interface import DataSource
+from domain.task import Task
+from usecase.interface import DataSource, TaskHandler
 
 logger = getLogger(__name__)
 
 
 class ProcessTasks:
-    def __init__(self, sources: list[DataSource] | None = None) -> None:
-        self._sources = sources or []
+    def __init__(
+        self,
+        handler: TaskHandler,
+        sources: list[DataSource] | None = None,
+    ) -> None:
+        if not isinstance(handler, TaskHandler) or not iscoroutinefunction(
+            getattr(handler, 'handle', None)
+        ):
+            raise TypeError(
+                f'Обработчик {handler.__class__.__name__} должен соотвествовать контракту TaskHandler'
+            )
+
+        self._handler = handler
+        self._sources: list[DataSource] = []
+
+        for source in sources or []:
+            self.add_source(source)
 
     def add_source(self, src: DataSource) -> None:
         if isinstance(src, DataSource):
@@ -19,17 +35,33 @@ class ProcessTasks:
                 f'Источник {src.__class__.__name__} должен соотвествовать контракту DataSource'
             )
 
-    def build_queue(self) -> TaskQueue:
-        source_queues = tuple(src.get_tasks() for src in self._sources)
+    async def _stream_tasks(self) -> AsyncIterator[Task]:
+        for source in self._sources:
+            source_name = source.__class__.__name__
+            logger.info('Start source processing: %s', source_name)
+            async for task in source.get_tasks():
+                yield task
+            logger.info('Finish source processing: %s', source_name)
 
-        return TaskQueue(lambda: chain.from_iterable(source_queues))
+    async def execute(self) -> None:
+        logger.info('Start task processing')
 
-    def execute(self, queue: TaskQueue | None = None) -> None:
-        tasks = queue if queue is not None else self.build_queue()
-
-        processed_count = 0
-        for task in tasks:
-            processed_count += 1
+        handled_count = 0
+        failed_count = 0
+        async for task in self._stream_tasks():
             logger.info('Process task: %s', task)
 
-        logger.info('Processed tasks: %s', processed_count)
+            try:
+                await self._handler.handle(task)
+            except Exception:
+                failed_count += 1
+                logger.exception('Failed to process task: %s', task)
+                continue
+
+            handled_count += 1
+
+        logger.info(
+            'Processed tasks summary handled=%s failed=%s',
+            handled_count,
+            failed_count,
+        )
